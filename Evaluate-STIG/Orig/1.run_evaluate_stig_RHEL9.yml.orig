@@ -1,0 +1,112 @@
+---
+- name: "Prepare Evaluate STIG"
+  remote_user: ansible
+  become: true
+  hosts: RHEL9 
+  gather_facts: no
+  vars:
+    ansible_remote_tmp: $HOME/.ansible/tmp
+  tasks:
+    - name: "Stop fapolicyd service"
+      ansible.builtin.service:
+        name: fapolicyd
+        state: stopped
+    - name: "Cleanup old CKL files on Remote Servers"
+      command: find /home/ansible/currentstigs/Checklist -type f -name "*.ckl" -exec rm -rf {} \;
+      ignore_errors: true
+    - name: "Make ES Directory"
+      command: mkdir -p /opt/ES/
+    - name: "Make Evaluate-STIG Directory"
+      command: mkdir -p /home/ansible/currentstigs/Evaluate-STIG/
+    - name: "Make Checklist Directory"
+      command: mkdir -p /home/ansible/currentstigs/Checklist/
+    - name: "Make AnswerFiles Directory"
+      command: mkdir -p /home/ansible/currentstigs/AnswerFiles/
+    - name: "Chown /opt/ES Directory to ansible user"
+      command: chown -R ansible:ansible /opt/ES/
+    - name: "Copy Evaluate STIG zip file"
+      copy:
+        src: /home/ansible/currentstigs/Evaluate-STIG/Evaluate-STIG_1.2501.4.zip
+        dest: /home/ansible/currentstigs/Evaluate-STIG/
+    - name: "Remove Old Answer Files"
+      command: find /opt/ES -type f -name "*.xml" -exec rm -rf {} \;
+    - name: "Unzip Evaluate STIG zip File on Remote Server"
+      command: unzip -o /home/ansible/currentstigs/Evaluate-STIG/Evaluate-STIG_1.2501.4.zip -d /opt/ES
+    - name: "Copy AnswerFile to Remote Server"
+      copy:
+        src: /home/ansible/currentstigs/AnswerFiles/RHEL9/AF_RHEL9_All.xml
+        dest: /home/ansible/currentstigs/AnswerFiles/
+    - name: "Copy AnswerFile to Evaluate STIG Directory"
+      command: cp /home/ansible/currentstigs/AnswerFiles/AF_RHEL9_All.xml /opt/ES/Evaluate-STIG/AnswerFiles/
+    - name: "Kill pwsh"
+      shell: pkill pwsh
+      ignore_errors: true
+    - name: "Kill python3"
+      shell: pkill /usr/bin/python3
+      ignore_errors: true
+    - name: "Run Evaluate STIG"
+      shell: pwsh /opt/ES/Evaluate-STIG/Evaluate-STIG.ps1 -ScanType Unclassified -AnswerKey AF_RHEL9_All.xml -output CKL -OutputPath /home/ansible/currentstigs -SelectSTIG RHEL9
+      async: 2100
+      poll: 0
+      register: evaluate_stig
+    - name: Check if Evaluate STIG has Completed
+      async_status:
+        jid: "{{ evaluate_stig.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      delay: 10
+      retries: 300
+    - name: "Move any CKL Files from Evaluate-STIG to Local Ansible Directory on Remote Server"
+      command: find / -type f -name "*.ckl" -exec mv {} /home/ansible/currentstigs/Checklist/ \;
+      ignore_errors: true
+    - name: "Find Files to Copy"
+      find:
+        paths: "/home/ansible/currentstigs/Checklist/"
+        recurse: no
+        patterns: "*.ckl"
+      register: files_to_fetch 
+    - name: "Fetch Remote CKL Files to Ansible Server"
+      fetch:
+        src: "{{ item.path }}"
+        dest: /home/ansible/currentstigs/Checklist/
+        flat: yes
+      with_items: "{{ files_to_fetch.files }}"
+    - name: "Create Directory in currentstigs with Today's Date"
+      shell: mkdir -p /home/ansible/currentstigs/Checklist/RHEL9/"$(date +"%m-%d-%Y")"
+    - name: "Move any CKL Files from Checklist Directory to Local Ansible Directory on Remote Server"
+      shell: find /home/ansible/currentstigs/Checklist/ -maxdepth 1 -type f -name "*.ckl" -exec mv {} /home/ansible/currentstigs/Checklist/RHEL9/$(date +%m-%d-%Y)/ \;
+    - name: "Take Ownership of the currentstigs Directory"
+      command: chown -R ansible:ansible /home/ansible/currentstigs/
+    - name: "Done"
+      debug:
+        msg: "All done! Evaluate STIG jobs completed."
+    - name: "Start fapolicyd service"
+      ansible.builtin.service:
+        name: fapolicyd
+        state: started
+
+  
+- name: "Submit Files to Git Repo"
+  hosts: localhost
+  tasks:
+    - name: "Create Directory in currentstigs with Today's Date"
+      shell: mkdir -p /home/ansible/currentstigs/Checklist/RHEL9/"$(date +"%m-%d-%Y")"
+    - name: "Move any CKL Files from Evaluate-STIG to Local Ansible Directory on Remote Server"
+      shell: find /home/ansible/currentstigs/Checklist/ -maxdepth 1 -type f -name "*.ckl" -exec mv {} /home/ansible/currentstigs/Checklist/RHEL9/$(date +%m-%d-%Y)/ \;
+    - name: "Take Ownership of the currentstigs Directory"
+      command: chown -R ansible:ansible /home/ansible/currentstigs/
+    - name: "Ask if user wants to submit to git" 
+      pause:
+        prompt: "Do you want to submit files to GIT Repo? (y/n)"
+      register: gitsubmit
+    - name: "git add all"
+      shell: chdir=/home/ansible/currentstigs git add -A
+    - name: "git commit"
+      shell: chdir=/home/ansible/currentstigs git commit -m "Adding CKL Files"
+    - name: "git push"
+      shell: chdir=/home/ansible/currentstigs git push origin master
+      when: gitsubmit.user_input | lower == 'y'
+  
+    - name: "Files submitted to git repo"
+      debug:
+        msg: "All done! You've submitted files to the git repository."
